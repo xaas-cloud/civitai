@@ -36,6 +36,7 @@ import {
 } from '~/server/games/daily-challenge/daily-challenge.utils';
 import { poolCounters } from '~/server/games/new-order/utils';
 import { logToAxiom } from '~/server/logging/client';
+import { withSpan } from '~/server/utils/otel-helpers';
 import { metricsSearchClient } from '~/server/meilisearch/client';
 import { postMetrics } from '~/server/metrics';
 import { videoGenerationConfig2 } from '~/server/orchestrator/generation/generation.config';
@@ -1548,137 +1549,143 @@ export const getAllImages = async (
     imageMetrics,
     imageMeta,
     imageResources,
-  ] = await Promise.all([
-    userId
-      ? dbRead.imageReaction.findMany({
-          where: { imageId: { in: imageIds }, userId },
-          select: { imageId: true, reaction: true },
-        })
-      : undefined,
-    include?.includes('tagIds') ? tagIdsForImagesCache.fetch(imageIds) : undefined,
-    include?.includes('tags') ? getImageTagsForImages(imageIds) : undefined,
-    include?.includes('tags') && userId
-      ? dbRead.tagsOnImageVote.findMany({
-          where: { imageId: { in: imageIds }, userId },
-          select: { imageId: true, tagId: true, vote: true },
-        })
-      : undefined,
-    getBasicDataForUsers(userIds),
-    includeCosmetics ? getCosmeticsForUsers(userIds) : undefined,
-    include?.includes('profilePictures') ? getProfilePicturesForUsers(userIds) : undefined,
-    includeCosmetics ? getCosmeticsForEntity({ ids: imageIds, entity: 'Image' }) : undefined,
-    getThumbnailsForImages(videoIds),
-    getImageMetricsObject(rawImages),
-    include?.includes('metaSelect') ? getMetaForImages(imageIds) : undefined,
-    includeBaseModel ? imageResourcesCache.fetch(imageIds) : undefined,
-  ]);
-
-  // Process reactions into lookup
-  let userReactions: Record<number, ReviewReactions[]> | undefined;
-  if (reactionsRaw) {
-    userReactions = reactionsRaw.reduce((acc, { imageId, reaction }) => {
-      acc[imageId] ??= [] as ReviewReactions[];
-      acc[imageId].push(reaction);
-      return acc;
-    }, {} as Record<number, ReviewReactions[]>);
-  }
-
-  // Merge user votes into tags
-  if (tagsVar && userVotes) {
-    for (const tag of tagsVar) {
-      const userVote = userVotes.find(
-        (vote) => vote.tagId === tag.id && vote.imageId === tag.imageId
-      );
-      if (userVote) tag.vote = userVote.vote > 0 ? 1 : -1;
-    }
-  }
-
-  const now = new Date();
-  const filtered = rawImages.filter((x) => {
-    if (isModerator) return true;
-    // if (x.needsReview && x.userId !== userId) return false;
-    if ((!x.publishedAt || x.publishedAt > now || !!x.unpublishedAt) && x.userId !== userId)
-      return false;
-    // if (x.ingestion !== 'Scanned' && x.userId !== userId) return false;
-    return true;
-  });
-
-  const images: Array<
-    Omit<ImageV2Model, 'nsfwLevel' | 'metadata'> & {
-      // meta: ImageMetaProps | null; // TODO - don't fetch meta
-      meta?: ImageMetaProps | null; // deprecated. Only used in v1 api endpoint
-      hideMeta: boolean; // TODO - remove references to this. Instead, use `hasMeta`
-      hasMeta: boolean;
-      tags?: VotableTagModel[] | undefined;
-      tagIds?: number[];
-      publishedAt?: Date | null;
-      modelVersionId?: number | null;
-      baseModel?: string | null; // TODO - remove
-      availability?: Availability;
-      nsfwLevel: NsfwLevel;
-      cosmetic?: WithClaimKey<ContentDecorationCosmetic> | null;
-      metadata: ImageMetadata | VideoMetadata | null;
-      onSite: boolean;
-      modelVersionIds?: number[];
-      modelVersionIdsManual?: number[];
-      thumbnailUrl?: string;
-      remixOfId?: number | null;
-      hasPositivePrompt?: boolean;
-      poi?: boolean;
-      minor?: boolean;
-      judgeScore?: JudgeScore | null;
-    }
-  > = filtered.map(({ userId: creatorId, cursorId, unpublishedAt, collectionItemNote, ...i }) => {
-    const judgeScore = parseJudgeScore(collectionItemNote ?? null);
-    const match = imageMetrics[i.id];
-    const thumbnail = thumbnails[i.id];
-    const userData = userBasicData[creatorId];
-
-    return {
-      ...i,
-      meta: imageMeta?.[i.id] ?? null,
-      nsfwLevel: Math.max(thumbnail?.nsfwLevel ?? 0, i.nsfwLevel),
-      modelVersionIds: imageResources?.[i.id]?.resources?.map((r) => r.modelVersionId) ?? [],
-      modelVersionIdsManual: [],
-      publishedAt: i.publishedAt ? i.sortAt : undefined,
-      baseModel: imageResources
-        ? getBaseModelFromResources(imageResources[i.id]?.resources)
+  ] = await withSpan('image:getAllImages:parallelFetch', () =>
+    Promise.all([
+      userId
+        ? dbRead.imageReaction.findMany({
+            where: { imageId: { in: imageIds }, userId },
+            select: { imageId: true, reaction: true },
+          })
         : undefined,
-      user: {
-        id: creatorId,
-        username: userData?.username ?? null,
-        image: userData?.image ?? null,
-        deletedAt: userData?.deletedAt ?? null,
-        cosmetics: userCosmetics?.[creatorId] ?? [],
-        profilePicture: profilePictures?.[creatorId] ?? null,
-      },
-      stats: {
-        likeCountAllTime: match?.reactionLike ?? 0,
-        laughCountAllTime: match?.reactionLaugh ?? 0,
-        heartCountAllTime: match?.reactionHeart ?? 0,
-        cryCountAllTime: match?.reactionCry ?? 0,
+      include?.includes('tagIds') ? tagIdsForImagesCache.fetch(imageIds) : undefined,
+      include?.includes('tags') ? getImageTagsForImages(imageIds) : undefined,
+      include?.includes('tags') && userId
+        ? dbRead.tagsOnImageVote.findMany({
+            where: { imageId: { in: imageIds }, userId },
+            select: { imageId: true, tagId: true, vote: true },
+          })
+        : undefined,
+      getBasicDataForUsers(userIds),
+      includeCosmetics ? getCosmeticsForUsers(userIds) : undefined,
+      include?.includes('profilePictures') ? getProfilePicturesForUsers(userIds) : undefined,
+      includeCosmetics ? getCosmeticsForEntity({ ids: imageIds, entity: 'Image' }) : undefined,
+      getThumbnailsForImages(videoIds),
+      getImageMetricsObject(rawImages),
+      include?.includes('metaSelect') ? getMetaForImages(imageIds) : undefined,
+      includeBaseModel ? imageResourcesCache.fetch(imageIds) : undefined,
+    ])
+  );
 
-        commentCountAllTime: match?.comment ?? 0,
-        collectedCountAllTime: match?.collection ?? 0,
-        tippedAmountCountAllTime: match?.buzz ?? 0,
+  const images = withSpan('image:getAllImages:transform', () => {
+    // Process reactions into lookup
+    let userReactions: Record<number, ReviewReactions[]> | undefined;
+    if (reactionsRaw) {
+      userReactions = reactionsRaw.reduce((acc, { imageId, reaction }) => {
+        acc[imageId] ??= [] as ReviewReactions[];
+        acc[imageId].push(reaction);
+        return acc;
+      }, {} as Record<number, ReviewReactions[]>);
+    }
 
-        dislikeCountAllTime: 0,
-        viewCountAllTime: 0,
-      },
-      reactions:
-        userReactions?.[i.id]?.map((r) => ({ userId: userId as number, reaction: r })) ?? [],
-      tags: tagsVar?.filter((x) => x.imageId === i.id),
-      tagIds: tagIdsVar?.[i.id]?.tags,
-      cosmetic: cosmetics?.[i.id] ?? null,
-      thumbnailUrl: thumbnail?.url,
-      judgeScore,
-    };
+    // Merge user votes into tags
+    if (tagsVar && userVotes) {
+      for (const tag of tagsVar) {
+        const userVote = userVotes.find(
+          (vote) => vote.tagId === tag.id && vote.imageId === tag.imageId
+        );
+        if (userVote) tag.vote = userVote.vote > 0 ? 1 : -1;
+      }
+    }
+
+    const now = new Date();
+    const filtered = rawImages.filter((x) => {
+      if (isModerator) return true;
+      // if (x.needsReview && x.userId !== userId) return false;
+      if ((!x.publishedAt || x.publishedAt > now || !!x.unpublishedAt) && x.userId !== userId)
+        return false;
+      // if (x.ingestion !== 'Scanned' && x.userId !== userId) return false;
+      return true;
+    });
+
+    const result: Array<
+      Omit<ImageV2Model, 'nsfwLevel' | 'metadata'> & {
+        // meta: ImageMetaProps | null; // TODO - don't fetch meta
+        meta?: ImageMetaProps | null; // deprecated. Only used in v1 api endpoint
+        hideMeta: boolean; // TODO - remove references to this. Instead, use `hasMeta`
+        hasMeta: boolean;
+        tags?: VotableTagModel[] | undefined;
+        tagIds?: number[];
+        publishedAt?: Date | null;
+        modelVersionId?: number | null;
+        baseModel?: string | null; // TODO - remove
+        availability?: Availability;
+        nsfwLevel: NsfwLevel;
+        cosmetic?: WithClaimKey<ContentDecorationCosmetic> | null;
+        metadata: ImageMetadata | VideoMetadata | null;
+        onSite: boolean;
+        modelVersionIds?: number[];
+        modelVersionIdsManual?: number[];
+        thumbnailUrl?: string;
+        remixOfId?: number | null;
+        hasPositivePrompt?: boolean;
+        poi?: boolean;
+        minor?: boolean;
+        judgeScore?: JudgeScore | null;
+      }
+    > = filtered.map(({ userId: creatorId, cursorId, unpublishedAt, collectionItemNote, ...i }) => {
+      const judgeScore = parseJudgeScore(collectionItemNote ?? null);
+      const match = imageMetrics[i.id];
+      const thumbnail = thumbnails[i.id];
+      const userData = userBasicData[creatorId];
+
+      return {
+        ...i,
+        meta: imageMeta?.[i.id] ?? null,
+        nsfwLevel: Math.max(thumbnail?.nsfwLevel ?? 0, i.nsfwLevel),
+        modelVersionIds: imageResources?.[i.id]?.resources?.map((r) => r.modelVersionId) ?? [],
+        modelVersionIdsManual: [],
+        publishedAt: i.publishedAt ? i.sortAt : undefined,
+        baseModel: imageResources
+          ? getBaseModelFromResources(imageResources[i.id]?.resources)
+          : undefined,
+        user: {
+          id: creatorId,
+          username: userData?.username ?? null,
+          image: userData?.image ?? null,
+          deletedAt: userData?.deletedAt ?? null,
+          cosmetics: userCosmetics?.[creatorId] ?? [],
+          profilePicture: profilePictures?.[creatorId] ?? null,
+        },
+        stats: {
+          likeCountAllTime: match?.reactionLike ?? 0,
+          laughCountAllTime: match?.reactionLaugh ?? 0,
+          heartCountAllTime: match?.reactionHeart ?? 0,
+          cryCountAllTime: match?.reactionCry ?? 0,
+
+          commentCountAllTime: match?.comment ?? 0,
+          collectedCountAllTime: match?.collection ?? 0,
+          tippedAmountCountAllTime: match?.buzz ?? 0,
+
+          dislikeCountAllTime: 0,
+          viewCountAllTime: 0,
+        },
+        reactions:
+          userReactions?.[i.id]?.map((r) => ({ userId: userId as number, reaction: r })) ?? [],
+        tags: tagsVar?.filter((x) => x.imageId === i.id),
+        tagIds: tagIdsVar?.[i.id]?.tags,
+        cosmetic: cosmetics?.[i.id] ?? null,
+        thumbnailUrl: thumbnail?.url,
+        judgeScore,
+      };
+    });
+
+    // Put into cached order if prioritizing user (model version showcase)
+    if (prioritizeUser && useModelVersionCache) {
+      result.sort((a, b) => ids!.indexOf(a.id) - ids!.indexOf(b.id));
+    }
+
+    return result;
   });
-
-  // Put into cached order if prioritizing user (model version showcase)
-  if (prioritizeUser && useModelVersionCache) {
-    images.sort((a, b) => ids!.indexOf(a.id) - ids!.indexOf(b.id));
-  }
 
   return {
     nextCursor,
@@ -3686,7 +3693,7 @@ type CachedImagesForModelVersions = {
 export const imagesForModelVersionsCache = createCachedObject<CachedImagesForModelVersions>({
   key: REDIS_KEYS.CACHES.IMAGES_FOR_MODEL_VERSION,
   idKey: 'modelVersionId',
-  ttl: CacheTTL.sm,
+  ttl: env.IS_DATAPACKET ? CacheTTL.day : CacheTTL.sm,
   // staleWhileRevalidate: false, // We might want to enable this later otherwise there will be a delay after a creator updates their showcase images...
   lookupFn: async (ids) => {
     const images = await getImagesForModelVersion({ modelVersionIds: ids, imagesPerVersion: 20 });
@@ -3895,7 +3902,7 @@ export const removeImageResource = async ({
     // if (!resource) throw throwNotFoundError(`No image resource with id ${id}`);
 
     purgeImageGenerationDataCache(imageId);
-    // purgeCache({ tags: [`image-resources-${imageId}`] });
+    await imageResourcesCache.bust(imageId);
 
     return resource;
   } catch (error) {
@@ -5125,6 +5132,7 @@ export async function updateImageNsfwLevel({
       where: { id },
       data: { nsfwLevel, nsfwLevelLocked: true, metadata: updatedMetadata },
     });
+    await imageMetadataCache.bust(id);
     // Current meilisearch image index gets locked specially when doing a single image update due to the cheer size of this index.
     // Commenting this out should solve the problem.
     // await imagesSearchIndex.updateSync([{ id, action: SearchIndexUpdateQueueAction.Update }]);
@@ -5441,6 +5449,7 @@ export async function resolveIngestionError({
       metadata: { ...metadata, nsfwLevelReason: 'Moderator ingestion error review' },
     },
   });
+  await imageMetadataCache.bust(id);
 
   // Post-scan actions matching what image-scan-result does on successful scan
   await tagIdsForImagesCache.refresh(id);
@@ -6116,6 +6125,7 @@ export async function setVideoThumbnail({
   await Promise.all([
     preventReplicationLag('postImages', postId),
     thumbnailCache.bust(imageId),
+    imageMetadataCache.bust(imageId),
     queueImageSearchIndexUpdate({
       ids: [imageId],
       action: SearchIndexUpdateQueueAction.Update,
@@ -6205,6 +6215,7 @@ export async function createImageResources({
     `;
   }
 
+  await imageResourcesCache.bust(imageId);
   return resources;
 }
 
@@ -6327,6 +6338,7 @@ export const toggleImageFlag = async ({ id, flag }: ToggleImageFlagInput) => {
     where: { id },
     data: { [flag]: !image[flag] },
   });
+  await imageMetadataCache.bust(id);
 
   // Ensure we update the search index:
   await imagesMetricsSearchIndex.queueUpdate([{ id, action: SearchIndexUpdateQueueAction.Update }]);
@@ -6345,6 +6357,7 @@ export const updateImagesFlag = async ({
     where: { id: { in: ids } },
     data: { [flag]: value },
   });
+  await imageMetadataCache.bust(ids);
 
   // Ensure we update the search index:
   await imagesMetricsSearchIndex.queueUpdate(
@@ -6359,10 +6372,7 @@ export async function refreshImageResources(imageId: number) {
     DELETE FROM "ImageResourceNew" WHERE "imageId" = ${imageId} AND detected
   `;
   await createImageResources({ imageId });
-  // await queueImageSearchIndexUpdate({
-  //   ids: [imageId],
-  //   action: SearchIndexUpdateQueueAction.Update,
-  // });
+  await imageResourcesCache.bust(imageId);
   return await dbWrite.imageResourceHelper.findMany({ where: { imageId } });
 }
 

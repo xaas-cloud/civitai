@@ -41,7 +41,12 @@ import { CopyButton } from '~/components/CopyButton/CopyButton';
 import { TrainedWords } from '~/components/TrainedWords/TrainedWords';
 import { useCurrentUser } from '~/hooks/useCurrentUser';
 
-import { Controller, MultiController, useGraph } from '~/libs/data-graph/react';
+import {
+  Controller,
+  MultiController,
+  useGraph,
+  useGraphSubscription,
+} from '~/libs/data-graph/react';
 import {
   type GenerationGraphTypes,
   type VersionOption,
@@ -325,7 +330,10 @@ export function GenerationForm() {
                     />
                     {modes.length > 0 && (
                       <ButtonGroupInput
-                        value={value as string}
+                        value={
+                          workflowConfigByKey.get(value as string)?.variantOf ??
+                          (value as string)
+                        }
                         onChange={(v) =>
                           graph.set({ workflow: v } as Parameters<typeof graph.set>[0])
                         }
@@ -499,17 +507,13 @@ export function GenerationForm() {
               graph={graph}
               name="images"
               render={({ value, meta, onChange, error }) => (
-                <ImageUploadMultipleInput
+                <ImagesInput
+                  graph={graph}
                   value={value}
                   onChange={onChange}
-                  aspect="square"
-                  max={meta?.max}
-                  slots={meta?.slots}
-                  error={error?.message}
-                  enableDrawing={snapshot.workflow === 'img2img:edit'}
-                  warnOnMissingAiMetadata={meta?.warnOnMissingAiMetadata}
-                  aspectRatios={meta?.aspectRatios}
-                  cropToFirstImage={meta?.cropToFirstImage}
+                  meta={meta}
+                  error={error}
+                  workflow={snapshot.workflow}
                 />
               )}
             />
@@ -805,6 +809,27 @@ export function GenerationForm() {
               )}
             />
 
+            {/* Num Frames (LTXV23 vid2vid:extend) */}
+            {/* <Controller
+              graph={graph}
+              name="numFrames"
+              render={({ value, meta, onChange }) => (
+                <SliderInput
+                  value={value}
+                  onChange={onChange}
+                  label={
+                    <ControllerLabel
+                      label="Frames to Extend"
+                      info="Number of frames to add when extending the video."
+                    />
+                  }
+                  min={meta.min}
+                  max={meta.max}
+                  step={meta.step}
+                />
+              )}
+            /> */}
+
             {/* Output Settings (image output only) */}
             <Controller
               graph={graph}
@@ -846,6 +871,28 @@ export function GenerationForm() {
 
             {/* Advanced section */}
             <AccordionLayout label="Advanced" storeKey="data-graph-v2-advanced">
+              {/* Frame Guide Strength (LTXV2/LTXV23 img2vid with both frames) */}
+              <Controller
+                graph={graph}
+                name="frameGuideStrength"
+                render={({ value, meta, onChange }) => (
+                  <SliderInput
+                    value={value}
+                    onChange={onChange}
+                    label={
+                      <ControllerLabel
+                        label="Frame Guide Strength"
+                        info="Controls how strongly the first/last frame images guide the video generation."
+                      />
+                    }
+                    min={meta.min}
+                    max={meta.max}
+                    step={meta.step}
+                    presets={meta.presets}
+                  />
+                )}
+              />
+
               {/* CFG Scale / Guidance - label varies by model family */}
               <Controller
                 graph={graph}
@@ -919,6 +966,72 @@ export function GenerationForm() {
                       <ControllerLabel
                         label="Steps"
                         info="The number of iterations spent generating."
+                      />
+                    }
+                    min={meta.min}
+                    max={meta.max}
+                    step={meta.step}
+                    presets={meta.presets}
+                  />
+                )}
+              />
+
+              {/* Canny Low Threshold (LTXV23 vid2vid:edit) */}
+              <Controller
+                graph={graph}
+                name="cannyLowThreshold"
+                render={({ value, meta, onChange }) => (
+                  <SliderInput
+                    value={value}
+                    onChange={onChange}
+                    label={
+                      <ControllerLabel
+                        label="Canny Low Threshold"
+                        info="Lower threshold for Canny edge detection. Lower values detect more edges."
+                      />
+                    }
+                    min={meta.min}
+                    max={meta.max}
+                    step={meta.step}
+                    presets={meta.presets}
+                  />
+                )}
+              />
+
+              {/* Canny High Threshold (LTXV23 vid2vid:edit) */}
+              <Controller
+                graph={graph}
+                name="cannyHighThreshold"
+                render={({ value, meta, onChange }) => (
+                  <SliderInput
+                    value={value}
+                    onChange={onChange}
+                    label={
+                      <ControllerLabel
+                        label="Canny High Threshold"
+                        info="Upper threshold for Canny edge detection. Higher values only keep strong edges."
+                      />
+                    }
+                    min={meta.min}
+                    max={meta.max}
+                    step={meta.step}
+                    presets={meta.presets}
+                  />
+                )}
+              />
+
+              {/* Guide Strength (LTXV23 vid2vid:edit) */}
+              <Controller
+                graph={graph}
+                name="guideStrength"
+                render={({ value, meta, onChange }) => (
+                  <SliderInput
+                    value={value}
+                    onChange={onChange}
+                    label={
+                      <ControllerLabel
+                        label="Guide Strength"
+                        info="Controls how closely the output follows the source video structure."
                       />
                     }
                     min={meta.min}
@@ -1214,6 +1327,56 @@ export function GenerationForm() {
     </div>
   );
 }
+
+// =============================================================================
+// Images Input (with optional annotations from graph)
+// =============================================================================
+
+/**
+ * Wraps ImageUploadMultipleInput and subscribes to the optional `annotations`
+ * computed node. Graphs that define an `annotations` node (e.g., upscale) get
+ * per-image badge overlays automatically; other graphs simply omit the node.
+ */
+function ImagesInput({
+  graph,
+  value,
+  onChange,
+  meta,
+  error,
+  workflow,
+}: {
+  graph: ReturnType<typeof useGraph<GenerationGraphTypes>>;
+  value: any;
+  onChange: any;
+  meta: any;
+  error: any;
+  workflow?: string;
+}) {
+  const annotationsSnapshot = useGraphSubscription(graph, 'annotations');
+  const annotations = annotationsSnapshot?.value as
+    | ({ label: string; color: string; tooltip?: string } | null)[]
+    | undefined;
+  return (
+    <ImageUploadMultipleInput
+      value={value}
+      onChange={onChange}
+      aspect="square"
+      max={meta?.max}
+      slots={meta?.slots}
+      error={error?.message}
+      enableDrawing={workflow === 'img2img:edit'}
+      warnOnMissingAiMetadata={meta?.warnOnMissingAiMetadata}
+      aspectRatios={meta?.aspectRatios}
+      cropToFirstImage={meta?.cropToFirstImage}
+      imageAnnotations={annotations ?? undefined}
+      imageLayout="wrap"
+    />
+  );
+}
+
+// =============================================================================
+// Helper Components
+// =============================================================================
 
 function ControllerLabel({ label, info }: { label: React.ReactNode; info?: string }) {
   if (!info) return <Input.Label>{label}</Input.Label>;
