@@ -146,8 +146,6 @@ export type ChallengeDetail = {
     } | null;
   }>;
   collectionId: number | null;
-  judgingPrompt: string | null;
-  reviewPercentage: number;
   maxEntriesPerUser: number;
   prizes: Prize[];
   entryPrize: Prize | null;
@@ -159,11 +157,9 @@ export type ChallengeDetail = {
   poolTrigger: PoolTrigger | null;
   maxPrizePool: number | null;
   prizeDistribution: number[] | null;
-  operationBudget: number;
   reviewCostType: ChallengeReviewCostType;
   reviewCost: number;
   entryCount: number;
-  commentCount: number;
   createdBy: {
     id: number;
     username: string | null;
@@ -179,15 +175,24 @@ export type ChallengeDetail = {
     username: string;
     imageId: number;
     imageUrl: string;
+    imageNsfwLevel: number;
+    imageHash: string | null;
     buzzAwarded: number;
     reason: string | null;
     judgeScore?: JudgeScore | null;
     profilePicture?: ProfileImage | null;
     cosmetics?: UserWithCosmetics['cosmetics'] | null;
   }>;
-  themeElements: string[] | null;
   completionSummary: ChallengeCompletionSummary | null;
   judgedTagId: number | null;
+};
+
+// Extended type with sensitive/internal fields for moderator edit form
+export type ChallengeDetailForEdit = ChallengeDetail & {
+  judgingPrompt: string | null;
+  reviewPercentage: number;
+  operationBudget: number;
+  themeElements: string[] | null;
 };
 
 export type ModeratorChallengeListItem = {
@@ -395,6 +400,57 @@ export type UserChallengeEntriesResult = {
   entries: UserChallengeEntry[];
   hasFlatRatePurchase: boolean;
 };
+
+// --- Previous Winners Page ---
+
+// Lightweight winner for list views
+export type ChallengeWinnerSummary = {
+  place: number;
+  userId: number;
+  username: string;
+  imageId: number;
+  imageUrl: string;
+  imageNsfwLevel: number;
+  imageHash: string | null;
+  buzzAwarded: number;
+  reason?: string | null;
+  judgeScore?: JudgeScore | null;
+  profilePicture?: ProfileImage | null;
+  cosmetics?: UserWithCosmetics['cosmetics'] | null;
+};
+
+// Challenge list item with inline winners
+export type ChallengeWithWinnersListItem = ChallengeListItem & {
+  winners: ChallengeWinnerSummary[];
+  completionSummary: ChallengeCompletionSummary | null;
+};
+
+// Input schema for completed challenges with winners
+export type GetCompletedChallengesWithWinnersInput = z.infer<
+  typeof getCompletedChallengesWithWinnersSchema
+>;
+export const getCompletedChallengesWithWinnersSchema = z.object({
+  cursor: z.string().optional(),
+  limit: z.coerce.number().min(1).max(100).default(20),
+  eventId: z.number().optional(),
+  browsingLevel: z.number().optional(),
+  query: z.string().optional(),
+});
+
+// --- Winner Cooldown ---
+
+export type WinnerCooldownStatus = {
+  onCooldown: boolean;
+  cooldownEndsAt: Date | null;
+  lastWinDate: Date | null;
+  lastWinChallengeId: number | null;
+  cooldownDays: number;
+};
+
+export type GetWinnerCooldownStatusInput = z.infer<typeof getWinnerCooldownStatusSchema>;
+export const getWinnerCooldownStatusSchema = z.object({
+  challengeId: z.number(),
+});
 
 // --- Challenge Events ---
 
