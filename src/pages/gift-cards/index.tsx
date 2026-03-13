@@ -297,7 +297,7 @@ export default function GiftCardsPage({ enabledVendors }: GiftCardsPageProps) {
         />
         <Container size="xl" py="xl">
           <Title order={1} mb="lg">
-            Gift Cards & Memberships
+            Memberships
           </Title>
           <Text>No vendors available at this time.</Text>
         </Container>
@@ -326,10 +326,10 @@ export default function GiftCardsPage({ enabledVendors }: GiftCardsPageProps) {
             <Group justify="space-between" align="flex-start" wrap="wrap">
               <div>
                 <Title order={1} mb="sm">
-                  Gift Cards & Memberships
+                  Memberships
                 </Title>
                 <Text c="dimmed" size="lg">
-                  Purchase Buzz gift cards and membership packages from our trusted vendors
+                  Purchase gift card membership packages from our trusted vendors
                 </Text>
               </div>
 
@@ -346,7 +346,7 @@ export default function GiftCardsPage({ enabledVendors }: GiftCardsPageProps) {
                       onChange={handleTypeChange}
                       data={[
                         { label: 'All', value: 'all' },
-                        { label: 'Buzz Cards', value: 'buzz' },
+                        // { label: 'Buzz Cards', value: 'buzz' },
                         { label: 'Memberships', value: 'memberships' },
                       ]}
                       size="sm"
@@ -475,8 +475,8 @@ export default function GiftCardsPage({ enabledVendors }: GiftCardsPageProps) {
             />
           ) : (
             <>
-              {/* Buzz Gift Cards Section */}
-              {showBuzzCards && selectedVendor.products.buzzCards.length > 0 && (
+              {/* Buzz Gift Cards Section — hidden now that crypto deposits are live */}
+              {/* {showBuzzCards && selectedVendor.products.buzzCards.length > 0 && (
                 <div>
                   <Title order={2} mb="lg">
                     Buzz Gift Cards
@@ -549,7 +549,7 @@ export default function GiftCardsPage({ enabledVendors }: GiftCardsPageProps) {
                     })}
                   </Grid>
                 </div>
-              )}
+              )} */}
 
               {/* Memberships Section */}
               {showMemberships && selectedVendor.products.memberships.length > 0 && (
