@@ -172,6 +172,7 @@ import { imageS3Client } from '~/utils/s3-client';
 import { serverUploadImage } from '~/utils/s3-utils';
 import { isDefined, isNumber } from '~/utils/type-guards';
 import FliptSingleton, { FLIPT_FEATURE_FLAGS, getFliptVariant, isFlipt } from '../flipt/client';
+import { buildFliptContext } from '~/server/services/feature-flags.service';
 import { queryBitdex } from '~/server/bitdex/client';
 import type { FilterClause, SortClause, Value } from '~/server/bitdex/client';
 import { compareBitdexResults, recordBitdexError } from '~/server/bitdex/compare';
@@ -1868,7 +1869,10 @@ export const getAllImagesIndex = async (
       type: sr.type as MediaType,
       createdAt: sr.sortAt,
       metadata: { ...metadata, width: sr.width ?? 0, height: sr.height ?? 0 },
-      publishedAt: publishedAtUnix ? sr.sortAt : undefined,
+      // Use sortAt as publishedAt when publishedAtUnix is missing/zero but image is
+      // in the result set (passed isPublished=true filter). Handles BitDex data where
+      // publishedAt=0 for bulk-loaded records that are actually published.
+      publishedAt: publishedAtUnix ? sr.sortAt : (sr.postId ? sr.sortAt : undefined),
       //
       user: {
         id: sr.userId,
@@ -2012,20 +2016,46 @@ async function fetchBitdexPrimary(input: ImageSearchInput) {
   // Covers nsfw0, private, blocked, unpublished, and poi (when disabled).
   // Merged into main results and re-sorted so they appear only when they
   // naturally fit the active sort. Runs in parallel with main query. First page only.
-  const ownExcludedClauses = [
-    _eq('nsfwLevel', _int(0)),
-    _eq('availability', _str(Availability.Private)),
-    _in('blockedFor', [BlockedReason.TOS, BlockedReason.Moderated, BlockedReason.CSAM, BlockedReason.AiNotVerified].map(_str)),
-    _eq('isPublished', _bool(false)),
-  ];
-  if (input.disablePoi) ownExcludedClauses.push(_eq('poi', _bool(true)));
+  //
+  // Content-scoping filters from the main query are applied so the second pass
+  // only returns content relevant to the current view (e.g. same model, same post).
+  // Skip entirely if viewing another user's profile (userId !== currentUserId).
+  const skipOwnExcluded = !input.currentUserId || bitdexCursor
+    || (input.userId && input.userId !== input.currentUserId);
 
-  const ownExcludedPromise = input.currentUserId && !bitdexCursor
-    ? queryBitdex('civitai', [
-        _eq('userId', _int(input.currentUserId)),
-        _or(...ownExcludedClauses),
-      ], { field: 'sortAt', direction: 'Desc' }, limit, undefined, undefined, true)
-    : null;
+  let ownExcludedPromise: ReturnType<typeof queryBitdex> | null = null;
+  if (!skipOwnExcluded) {
+    const ownExcludedClauses = [
+      _eq('nsfwLevel', _int(0)),
+      _eq('availability', _str(Availability.Private)),
+      _in('blockedFor', [BlockedReason.TOS, BlockedReason.Moderated, BlockedReason.CSAM, BlockedReason.AiNotVerified].map(_str)),
+      _eq('isPublished', _bool(false)),
+    ];
+    if (input.disablePoi) ownExcludedClauses.push(_eq('poi', _bool(true)));
+
+    // Content-scoping filters — keep second pass results relevant to the current view
+    const scopeFilters: FilterClause[] = [
+      _eq('userId', _int(input.currentUserId!)),
+      _or(...ownExcludedClauses),
+    ];
+    if (input.modelVersionId) {
+      scopeFilters.push(_or(
+        _eq('postedToId', _int(input.modelVersionId)),
+        _in('modelVersionIds', [_int(input.modelVersionId)])
+      ));
+    }
+    if (input.postId) scopeFilters.push(_eq('postId', _int(input.postId)));
+    if (input.postIds?.length) scopeFilters.push(_in('postId', input.postIds.map(_int)));
+    if (input.types?.length) scopeFilters.push(_in('type', input.types.map(_str)));
+    if (input.tags?.length) scopeFilters.push(_in('tagIds', input.tags.map(_int)));
+    if (input.baseModels?.length) scopeFilters.push(_in('baseModel', input.baseModels.map(_str)));
+    if (input.remixOfId) scopeFilters.push(_eq('remixOfId', _int(input.remixOfId)));
+    if (input.withMeta) scopeFilters.push(_eq('hasMeta', _bool(true)));
+    if (input.fromPlatform) scopeFilters.push(_eq('onSite', _bool(true)));
+
+    ownExcludedPromise = queryBitdex('civitai', scopeFilters,
+      { field: 'sortAt', direction: 'Desc' }, limit, undefined, undefined, true);
+  }
 
   // Main loop: fetch pages, post-filter, accumulate until we have enough.
   // Main query uses strict filters (cacheable). User's own excluded content
@@ -2099,9 +2129,14 @@ export async function getImagesFromSearch(input: ImageSearchInput) {
   }
 
   // Check BitDex mode (off / shadow / primary)
+  // Use buildFliptContext (same as comics) so both 'moderators' (isModerator=true)
+  // and 'testers' (userId in list) segments match correctly.
   const bitdexMode = await getFliptVariant(
     FLIPT_FEATURE_FLAGS.BITDEX_IMAGE_SEARCH,
-    input.currentUserId?.toString() || 'anonymous'
+    input.currentUserId?.toString() || 'anonymous',
+    buildFliptContext(input.currentUserId
+      ? { id: input.currentUserId, isModerator: input.isModerator } as SessionUser
+      : undefined)
   );
   console.log('[BitDex] flipt mode:', JSON.stringify(bitdexMode), 'user:', input.currentUserId);
 
@@ -2123,18 +2158,19 @@ export async function getImagesFromSearch(input: ImageSearchInput) {
   const meiliStart = Date.now();
   const result = await searchFn(input);
 
-  // Shadow mode: fire BitDex async alongside Meili for comparison
+  // Shadow mode: run the same fetchBitdexPrimary path (cacheable filters + second pass)
+  // that primary uses, compare results against Meili, but serve Meili results.
   if (bitdexMode === 'shadow') {
     const meiliElapsed = Date.now() - meiliStart;
-    getImagesFromBitdexPreFilter(input)
+    fetchBitdexPrimary(input)
       .then((bitdexResult) => {
         if (bitdexResult) {
           compareBitdexResults({
-            bitdexIds: bitdexResult.ids,
+            bitdexIds: bitdexResult.data.map((d) => d.id),
             meiliIds: result.data.map((i: { id: number }) => i.id),
-            bitdexTotalMatched: bitdexResult.total_matched,
+            bitdexTotalMatched: bitdexResult.data.length,
             meiliTotalMatched: result.data.length,
-            bitdexElapsedMs: bitdexResult.elapsed_us / 1000,
+            bitdexElapsedMs: 0, // timing not available from fetchBitdexPrimary
             meiliElapsedMs: meiliElapsed,
             sort: input.sort ?? 'Newest',
             hasPeriod: !!input.period,
@@ -2928,6 +2964,9 @@ export async function getImagesFromBitdexPreFilter(
     filters.push(_not(_eq('availability', _str(Availability.Private))));
     filters.push(_notIn('blockedFor', allBlockedReasons));
   }
+
+  // Only show images that belong to a post (postId=0 means no post — e.g. comic references)
+  filters.push(_not(_eq('postId', _int(0))));
 
   if (postId) postIds = [...postIds, postId];
 
