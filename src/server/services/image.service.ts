@@ -1869,10 +1869,7 @@ export const getAllImagesIndex = async (
       type: sr.type as MediaType,
       createdAt: sr.sortAt,
       metadata: { ...metadata, width: sr.width ?? 0, height: sr.height ?? 0 },
-      // Use sortAt as publishedAt when publishedAtUnix is missing/zero but image is
-      // in the result set (passed isPublished=true filter). Handles BitDex data where
-      // publishedAt=0 for bulk-loaded records that are actually published.
-      publishedAt: publishedAtUnix ? sr.sortAt : (sr.postId ? sr.sortAt : undefined),
+      publishedAt: publishedAtUnix ? sr.sortAt : undefined,
       //
       user: {
         id: sr.userId,
@@ -2033,10 +2030,12 @@ async function fetchBitdexPrimary(input: ImageSearchInput) {
     ];
     if (input.disablePoi) ownExcludedClauses.push(_eq('poi', _bool(true)));
 
-    // Content-scoping filters — keep second pass results relevant to the current view
+    // Content-scoping filters — keep second pass results relevant to the current view.
+    // Must include postId!=0 to match the main query's filter (excludes comic/orphaned images).
     const scopeFilters: FilterClause[] = [
       _eq('userId', _int(input.currentUserId!)),
       _or(...ownExcludedClauses),
+      _not(_eq('postId', _int(0))),
     ];
     if (input.modelVersionId) {
       scopeFilters.push(_or(
