@@ -17,12 +17,10 @@ import {
   IconChevronRight,
   IconCircleCheck,
   IconLock,
-  IconLockOpen,
 } from '@tabler/icons-react';
-import { useMemo, useRef, useState } from 'react';
+import { useMemo, useState } from 'react';
 import dayjs from 'dayjs';
 import type { PrepaidToken, SubscriptionProductMetadata } from '~/server/schema/subscriptions.schema';
-import { TransactionType } from '~/shared/constants/buzz.constants';
 import { trpc } from '~/utils/trpc';
 import { showErrorNotification, showSuccessNotification } from '~/utils/notifications';
 
@@ -32,16 +30,9 @@ const TIER_COLORS: Record<string, string> = {
   gold: 'yellow',
 };
 
-const BUZZ_TO_TIER: Record<number, string> = {
-  50000: 'gold',
-  25000: 'silver',
-  10000: 'bronze',
-};
-
 /**
- * Fetches historical prepaid buzz deliveries from the buzz service and parses them
- * into PrepaidToken-like objects for display alongside real tokens.
- * Deduplicates against existing tokens that already have a buzzTransactionId.
+ * Fetches historical prepaid buzz deliveries from ClickHouse in a single query.
+ * Deduplicates against existing tokens from the prepaid token system.
  */
 function useHistoricalPrepaidDeliveries({
   subscription,
@@ -50,80 +41,34 @@ function useHistoricalPrepaidDeliveries({
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   subscription: any;
   existingTokens: PrepaidToken[];
-}): { history: PrepaidToken[]; isLoading: boolean } {
+}): {
+  history: PrepaidToken[];
+  isLoading: boolean;
+} {
   const isCivitai = subscription?.product?.provider === 'Civitai';
-  const buzzType = (subscription?.product?.metadata as SubscriptionProductMetadata)?.buzzType ?? 'yellow';
+  const buzzType =
+    (subscription?.product?.metadata as SubscriptionProductMetadata)?.buzzType ?? 'yellow';
+  const accountType = buzzType === 'green' ? ('green' as const) : ('yellow' as const);
 
-  const datesRef = useRef({
-    start: dayjs().subtract(24, 'months').startOf('day').toDate(),
-    end: dayjs().endOf('day').toDate(),
-  });
-
-  const { data: txData, isLoading } = trpc.buzz.getUserTransactions.useQuery(
-    {
-      type: TransactionType.Purchase,
-      start: datesRef.current.start,
-      end: datesRef.current.end,
-      limit: 200,
-      accountType: buzzType === 'green' ? 'green' : 'yellow',
-    },
+  const { data, isLoading } = trpc.subscriptions.getHistoricalPrepaidDeliveries.useQuery(
+    { accountType },
     { enabled: isCivitai }
   );
 
   const history = useMemo(() => {
-    if (!txData?.transactions) return [];
+    if (!data || data.length === 0) return [];
 
-    // Collect all buzzTransactionIds from existing tokens to deduplicate
     const existingTxIds = new Set(
-      existingTokens
-        .filter((t) => t.buzzTransactionId)
-        .map((t) => t.buzzTransactionId!)
+      existingTokens.filter((t) => t.buzzTransactionId).map((t) => t.buzzTransactionId!)
     );
 
-    // Also collect prepaid-token-claim:* IDs since those are new-system claims
-    const claimTxIds = new Set(
-      existingTokens
-        .filter((t) => t.buzzTransactionId?.startsWith('prepaid-token-claim:'))
-        .map((t) => t.buzzTransactionId!)
-    );
+    return data.filter((t) => !existingTxIds.has(t.buzzTransactionId ?? ''));
+  }, [data, existingTokens]);
 
-    const historicalTokens: PrepaidToken[] = [];
-
-    for (const tx of txData.transactions) {
-      const extId = tx.externalTransactionId ?? '';
-      const details = tx.details as Record<string, unknown> | null | undefined;
-      const detailsType = details?.type as string | undefined;
-
-      // Only include civitai-membership transactions (old auto-deliveries)
-      const isMembershipTx =
-        extId.startsWith('civitai-membership') ||
-        detailsType === 'membership-purchase' ||
-        detailsType === 'civitai-membership-payment';
-
-      if (!isMembershipTx) continue;
-
-      // Skip if this transaction is already represented by an existing token
-      if (existingTxIds.has(extId)) continue;
-      if (claimTxIds.has(extId)) continue;
-
-      // Infer tier from transaction details or amount
-      const tier = (details?.tier as string) ?? BUZZ_TO_TIER[tx.amount] ?? 'silver';
-      const dateStr = (details?.date as string) ?? dayjs(tx.date).format('YYYY-MM');
-
-      historicalTokens.push({
-        id: `history_${extId}`,
-        tier: tier as PrepaidToken['tier'],
-        status: 'claimed',
-        buzzAmount: tx.amount,
-        claimedAt: typeof tx.date === 'string' ? tx.date : new Date(tx.date as any).toISOString(),
-        buzzTransactionId: extId,
-      });
-    }
-
-    return historicalTokens;
-  }, [txData, existingTokens]);
-
-  return { history, isLoading: isCivitai && isLoading };
+  return {
+    history,
+    isLoading: isCivitai && isLoading,
+  };
 }
 
 function TokenCard({ token, onClaimed }: { token: PrepaidToken; onClaimed?: () => void }) {
@@ -310,12 +255,14 @@ export function PrepaidTokenOverview({
     onTokensClaimed?.();
   };
 
-  // Fetch historical prepaid deliveries from buzz service (on-demand, deduplicated)
-  const { history: historicalDeliveries, isLoading: historyLoading } =
-    useHistoricalPrepaidDeliveries({
-      subscription,
-      existingTokens: tokens,
-    });
+  // Fetch historical prepaid deliveries from ClickHouse (single query, deduplicated)
+  const {
+    history: historicalDeliveries,
+    isLoading: historyLoading,
+  } = useHistoricalPrepaidDeliveries({
+    subscription,
+    existingTokens: tokens,
+  });
 
   const unlocked = tokens.filter((t) => t.status === 'unlocked');
   const locked = tokens.filter((t) => t.status === 'locked');
@@ -326,7 +273,7 @@ export function PrepaidTokenOverview({
   const unlockedBuzz = unlocked.reduce((sum, t) => sum + t.buzzAmount, 0);
   const claimedBuzz = claimed.reduce((sum, t) => sum + t.buzzAmount, 0);
 
-  // Don't render empty shell — wait for history to load or show nothing
+  // Don't render empty shell
   const hasAnything = unlocked.length > 0 || locked.length > 0 || claimed.length > 0 || historyLoading;
   if (!hasAnything) return null;
 
@@ -441,7 +388,11 @@ export function PrepaidTokenOverview({
                   {claimedOpen ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />}
                   <IconCircleCheck size={14} color="var(--mantine-color-yellow-5)" />
                   <Text size="sm" fw={600} c="yellow">
-                    {historyLoading ? 'Loading history...' : `${claimed.length} Claimed`}
+                    {historyLoading
+                      ? 'Loading history...'
+                      : claimed.length > 0
+                        ? `${claimed.length} Claimed`
+                        : 'Claim History'}
                   </Text>
                   {historyLoading && <Loader size={14} color="yellow" />}
                 </Group>
